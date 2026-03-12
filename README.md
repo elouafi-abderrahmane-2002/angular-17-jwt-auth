@@ -1,233 +1,199 @@
-# 🔐 Angular JWT — Refresh Token, Role Guards & Tests
+# ☁️ Symfony Clean Architecture — DDD, Domain Events & Cloud-Ready
 
-L'authentification JWT côté Angular, c'est plus qu'un `localStorage.setItem`.
-Ce projet implémente le flux complet : access token de courte durée,
-refresh token automatique, gestion des rôles par route et par template,
-et tests unitaires sur chaque pièce du dispositif.
+Une application Cloud-Ready n'est pas juste une application dans un container.
+C'est une application dont l'architecture est conçue pour être déployée,
+scalée et opérée dans un environnement cloud : services découplés, communication
+asynchrone, configuration par variables d'environnement, health checks.
+Ce projet est un template Symfony qui répond à ces exigences.
 
 ---
 
-## Flux d'authentification complet
+## Architecture Cloud-Ready — ce que ça signifie concrètement
 
 ```
-  Utilisateur → Login Form
-          │
-          ▼
-  POST /auth/login
-          │
-          ▼
-  Serveur retourne :
-  {
-    accessToken:  "eyJ..." (expire dans 15 min)
-    refreshToken: "eyJ..." (expire dans 7 jours)
-  }
-          │
-          ├── accessToken  → mémoire (BehaviorSubject)
-          └── refreshToken → HttpOnly Cookie (idéal) ou localStorage
-
-  Pour chaque requête :
-  ──────────────────────────────────────────────────────
-  Requête → JwtInterceptor → ajoute "Authorization: Bearer {accessToken}"
-          │
-          ├── [200] → réponse normale
-          └── [401] → token expiré
-                  │
-                  ├── Appel POST /auth/refresh avec refreshToken
-                  │       │
-                  │       ├── [200] → nouveau accessToken → rejouer la requête originale
-                  │       └── [401] → logout() + redirect /login
-                  │
-                  └── Requêtes en attente : mises en file, rejouées après refresh
+  ┌─────────────────────────────────────────────────────────────┐
+  │  Cloud-Ready Checklist                                      │
+  │                                                             │
+  │  ✅ Stateless — aucun état en mémoire entre requêtes        │
+  │  ✅ Config par env vars — .env.prod sans secrets hardcodés  │
+  │  ✅ Docker multi-stage — image de prod légère (<100MB)      │
+  │  ✅ Health check endpoint — /health pour load balancer      │
+  │  ✅ Logs structurés JSON — compatibles CloudWatch/ELK       │
+  │  ✅ Async via Messenger — workers découplés de l'API        │
+  │  ✅ DB externalisée — RDS (AWS) en prod, SQLite en CI       │
+  │  ✅ Migrations versionnées — Doctrine Migrations, idempotentes│
+  └─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## AuthService — gestion complète des tokens
+## Domain Events + Symfony Messenger — communication asynchrone
 
-```typescript
-@Injectable({ providedIn: 'root' })
-export class AuthService {
-  private currentUserSubject = new BehaviorSubject<User | null>(null);
-  public currentUser$ = this.currentUserSubject.asObservable();
-
-  constructor(private http: HttpClient, private router: Router) {
-    // Restaurer l'utilisateur depuis le token au démarrage
-    const token = this.getAccessToken();
-    if (token && !this.isTokenExpired(token)) {
-      this.currentUserSubject.next(this.decodeToken(token));
-    }
-  }
-
-  login(credentials: LoginDto): Observable<AuthTokens> {
-    return this.http.post<AuthTokens>('/api/auth/login', credentials).pipe(
-      tap(tokens => this.handleTokens(tokens))
-    );
-  }
-
-  refreshToken(): Observable<AuthTokens> {
-    const refreshToken = localStorage.getItem('refresh_token');
-    return this.http.post<AuthTokens>('/api/auth/refresh', { refreshToken }).pipe(
-      tap(tokens => this.handleTokens(tokens))
-    );
-  }
-
-  logout(): void {
-    localStorage.removeItem('access_token');
-    localStorage.removeItem('refresh_token');
-    this.currentUserSubject.next(null);
-    this.router.navigate(['/auth/login']);
-  }
-
-  getUserRoles(): string[] {
-    const token = this.getAccessToken();
-    if (!token) return [];
-    const decoded = this.decodeToken(token);
-    return decoded?.roles ?? [];
-  }
-
-  getAccessToken(): string | null {
-    return localStorage.getItem('access_token');
-  }
-
-  isTokenExpired(token: string): boolean {
-    const decoded = this.decodeToken(token);
-    if (!decoded?.exp) return true;
-    return Date.now() >= decoded.exp * 1000;
-  }
-
-  private handleTokens(tokens: AuthTokens): void {
-    localStorage.setItem('access_token',  tokens.accessToken);
-    localStorage.setItem('refresh_token', tokens.refreshToken);
-    this.currentUserSubject.next(this.decodeToken(tokens.accessToken));
-  }
-
-  private decodeToken(token: string): any {
-    try {
-      return JSON.parse(atob(token.split('.')[1]));
-    } catch {
-      return null;
-    }
-  }
-}
-```
-
----
-
-## Directive *hasRole — contrôle par template
-
-```typescript
-// shared/directives/has-role.directive.ts
-@Directive({ selector: '[hasRole]' })
-export class HasRoleDirective implements OnInit {
-  @Input('hasRole') requiredRole!: string | string[];
-
-  constructor(
-    private viewContainer: ViewContainerRef,
-    private templateRef: TemplateRef<any>,
-    private authService: AuthService
-  ) {}
-
-  ngOnInit(): void {
-    const userRoles = this.authService.getUserRoles();
-    const required = Array.isArray(this.requiredRole)
-      ? this.requiredRole
-      : [this.requiredRole];
-
-    if (required.some(r => userRoles.includes(r))) {
-      this.viewContainer.createEmbeddedView(this.templateRef);
-    } else {
-      this.viewContainer.clear();
-    }
-  }
+```php
+// User/Domain/Event/UserCreatedEvent.php
+final readonly class UserCreatedEvent
+{
+    public function __construct(
+        public string             $userId,
+        public string             $email,
+        public \DateTimeImmutable $occurredAt = new \DateTimeImmutable(),
+    ) {}
 }
 
-// Usage dans le template :
-// <button *hasRole="'ADMIN'">Supprimer</button>
-// <div *hasRole="['ADMIN', 'MANAGER']">Section réservée</div>
+// User/Application/Listener/SendWelcomeEmailOnUserCreated.php
+// Handler synchrone — s'exécute immédiatement dans le même processus
+final readonly class SendWelcomeEmailOnUserCreated
+{
+    public function __construct(private MailerInterface $mailer) {}
+
+    #[AsMessageHandler]
+    public function __invoke(UserCreatedEvent $event): void
+    {
+        $email = (new TemplatedEmail())
+            ->to($event->email)
+            ->subject('Bienvenue !')
+            ->htmlTemplate('emails/welcome.html.twig')
+            ->context(['userId' => $event->userId]);
+
+        $this->mailer->send($email);
+    }
+}
+
+// Pour rendre l'événement ASYNCHRONE (Cloud-Ready) :
+// config/packages/messenger.php
+return static function (MessengerConfig $messenger) {
+    $messenger->routing([
+        UserCreatedEvent::class       => ['async'],  // → queue SQS (AWS) ou Redis
+        IntegrationEventInterface::class => ['async'],
+        SendEmailMessage::class       => ['async'],
+    ]);
+};
+
+// Lancer le worker :
+// php bin/console messenger:consume async --limit=100 --memory-limit=128M
 ```
 
 ---
 
-## Tests unitaires Jasmine — AuthService
+## Docker multi-stage — image de production optimisée
 
-```typescript
-describe('AuthService', () => {
-  let service: AuthService;
-  let httpMock: HttpTestingController;
-  let routerSpy: jasmine.SpyObj<Router>;
+```dockerfile
+# Dockerfile
+# ---- Stage 1 : builder (toutes les dépendances de dev) ----
+FROM php:8.2-fpm-alpine AS builder
 
-  beforeEach(() => {
-    routerSpy = jasmine.createSpyObj('Router', ['navigate']);
+RUN apk add --no-cache git zip libzip-dev \
+    && docker-php-ext-install pdo_mysql opcache zip
 
-    TestBed.configureTestingModule({
-      imports: [HttpClientTestingModule],
-      providers: [
-        AuthService,
-        { provide: Router, useValue: routerSpy }
-      ]
-    });
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
-    service = TestBed.inject(AuthService);
-    httpMock = TestBed.inject(HttpTestingController);
-    localStorage.clear();
-  });
+WORKDIR /app
+COPY composer.json composer.lock ./
+RUN composer install --no-dev --no-scripts --optimize-autoloader
 
-  afterEach(() => {
-    httpMock.verify();
-    localStorage.clear();
-  });
+COPY . .
+RUN composer run-script post-install-cmd \
+    && php bin/console cache:warmup --env=prod
 
-  it('should store tokens after login', () => {
-    const mockTokens = {
-      accessToken:  'eyJ.mock.access',
-      refreshToken: 'eyJ.mock.refresh'
-    };
+# ---- Stage 2 : production (image légère sans composer ni dev deps) ----
+FROM php:8.2-fpm-alpine AS production
 
-    service.login({ username: 'admin', password: 'secret' }).subscribe();
+RUN docker-php-ext-install pdo_mysql opcache
 
-    const req = httpMock.expectOne('/api/auth/login');
-    req.flush(mockTokens);
+WORKDIR /app
+COPY --from=builder /app /app
 
-    expect(localStorage.getItem('access_token')).toBe(mockTokens.accessToken);
-    expect(localStorage.getItem('refresh_token')).toBe(mockTokens.refreshToken);
-  });
+# Health check intégré
+HEALTHCHECK --interval=30s --timeout=5s \
+    CMD php bin/console about --env=prod || exit 1
 
-  it('should clear tokens and redirect on logout', () => {
-    localStorage.setItem('access_token',  'some.token');
-    localStorage.setItem('refresh_token', 'some.refresh');
+USER www-data
+EXPOSE 9000
+```
 
-    service.logout();
+---
 
-    expect(localStorage.getItem('access_token')).toBeNull();
-    expect(routerSpy.navigate).toHaveBeenCalledWith(['/auth/login']);
-  });
+## Configuration Cloud — variables d'environnement AWS
 
-  it('should return user roles from decoded token', () => {
-    // Token avec payload { roles: ['ADMIN', 'USER'] }
-    const payload = btoa(JSON.stringify({ roles: ['ADMIN', 'USER'], exp: 9999999999 }));
-    localStorage.setItem('access_token', `eyJ.${payload}.sig`);
+```yaml
+# config/packages/doctrine.yaml
+doctrine:
+    dbal:
+        url: '%env(resolve:DATABASE_URL)%'
+        # En prod AWS : DATABASE_URL=mysql://user:pass@rds-endpoint:3306/hermes2
+        # En CI/CD    : DATABASE_URL=sqlite:///%kernel.project_dir%/var/test.db
 
-    const roles = service.getUserRoles();
+# config/packages/messenger.yaml
+framework:
+    messenger:
+        transports:
+            async:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%'
+                # AWS SQS : sqs://sqs.eu-west-1.amazonaws.com/123/hermes2-queue
+                # Redis   : redis://redis:6379/messages
+                # Dev     : doctrine://default
+```
 
-    expect(roles).toContain('ADMIN');
-    expect(roles).toContain('USER');
-  });
-});
+---
+
+## GitHub Actions — CI/CD vers AWS EC2
+
+```yaml
+# .github/workflows/deploy.yml
+name: CI/CD → AWS
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with: { php-version: '8.2', coverage: xdebug }
+
+      - run: composer install
+      - run: php bin/console doctrine:database:create --env=test
+      - run: php bin/console doctrine:migrations:migrate --no-interaction --env=test
+      - run: php bin/phpunit --coverage-clover coverage.xml
+      - run: php vendor/bin/phpstan analyse src --level=8
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build & push Docker image
+        run: |
+          docker build --target production -t hermes2:${{ github.sha }} .
+          docker tag hermes2:${{ github.sha }} ${{ secrets.ECR_REGISTRY }}/hermes2:latest
+          docker push ${{ secrets.ECR_REGISTRY }}/hermes2:latest
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1
+        with:
+          host:     ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key:      ${{ secrets.EC2_KEY }}
+          script: |
+            docker pull ${{ secrets.ECR_REGISTRY }}/hermes2:latest
+            docker-compose -f /app/docker-compose.prod.yml up -d --force-recreate
+            docker exec app php bin/console doctrine:migrations:migrate --no-interaction
 ```
 
 ---
 
 ## Ce que j'ai appris
 
-Le test le plus important ici n'est pas le login — c'est le comportement
-sous charge simultanée : que se passe-t-il si 3 requêtes reçoivent un 401
-au même moment ? Sans protection, on déclenche 3 refresh, le 2ème invalide
-le token du 1er, et l'utilisateur se retrouve déconnecté sans raison.
+Le découplage via Domain Events et Messenger change la façon dont on pense
+les effets de bord. Sans Messenger, "créer un utilisateur" déclenche directement
+l'envoi d'email — si le serveur SMTP est down, la création échoue. Avec Messenger
+async, l'utilisateur est créé et la réponse 201 est retournée immédiatement.
+L'email est envoyé par un worker séparé, qui peut réessayer en cas d'échec.
 
-Le `BehaviorSubject` dans l'interceptor + le flag `isRefreshing` est la
-solution classique. Mais la valider en test nécessite de simuler des appels
-concurrents avec `forkJoin` — c'est ce type de test qui révèle les vraies
-fragilités d'une implémentation.
+C'est exactement le type de résilience attendue dans une architecture Cloud-Ready
+— les effets secondaires ne doivent jamais bloquer l'opération principale.
 
 ---
 
