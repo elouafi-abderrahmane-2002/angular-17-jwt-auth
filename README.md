@@ -1,91 +1,235 @@
-# Angular 17 JWT Authentication & Authorization example with Rest API
+# 🔐 Angular JWT — Refresh Token, Role Guards & Tests
 
-Build Angular 17 JWT Authentication & Authorization example with Rest Api, HttpOnly Cookie and JWT (including HttpInterceptor, Router & Form Validation).
-- JWT Authentication Flow for User Registration (Signup) & User Login
-- Project Structure with HttpInterceptor, Router
-- Way to implement HttpInterceptor
-- How to store JWT token in HttpOnly Cookie
-- Creating Login, Signup Components with Form Validation
-- Angular Components for accessing protected Resources
-- How to add a dynamic Navigation Bar to Angular App
-- Working with Browser Session Storage
+L'authentification JWT côté Angular, c'est plus qu'un `localStorage.setItem`.
+Ce projet implémente le flux complet : access token de courte durée,
+refresh token automatique, gestion des rôles par route et par template,
+et tests unitaires sur chaque pièce du dispositif.
 
-## Flow for User Registration and User Login
-For JWT – Token based Authentication with Rest API, we’re gonna call 2 endpoints:
-- POST `api/auth/signup` for User Registration
-- POST `api/auth/signin` for User Login
-- POST `api/auth/signout` for User Logout
+---
 
-You can take a look at following flow to have an overview of Requests and Responses that Angular 17 JWT Authentication & Authorization Client will make or receive.
+## Flux d'authentification complet
 
-![angular-17-jwt-authentication-authorization-flow](angular-17-jwt-authentication-authorization-flow.png)
+```
+  Utilisateur → Login Form
+          │
+          ▼
+  POST /auth/login
+          │
+          ▼
+  Serveur retourne :
+  {
+    accessToken:  "eyJ..." (expire dans 15 min)
+    refreshToken: "eyJ..." (expire dans 7 jours)
+  }
+          │
+          ├── accessToken  → mémoire (BehaviorSubject)
+          └── refreshToken → HttpOnly Cookie (idéal) ou localStorage
 
-## Angular JWT App Diagram with Router and HttpInterceptor
-![angular-17-jwt-authentication](angular-17-jwt-authentication.png)
+  Pour chaque requête :
+  ──────────────────────────────────────────────────────
+  Requête → JwtInterceptor → ajoute "Authorization: Bearer {accessToken}"
+          │
+          ├── [200] → réponse normale
+          └── [401] → token expiré
+                  │
+                  ├── Appel POST /auth/refresh avec refreshToken
+                  │       │
+                  │       ├── [200] → nouveau accessToken → rejouer la requête originale
+                  │       └── [401] → logout() + redirect /login
+                  │
+                  └── Requêtes en attente : mises en file, rejouées après refresh
+```
 
-For more detail, please visit the tutorial:
-> [Angular 17 JWT Authentication & Authorization with Web API example](https://www.bezkoder.com/angular-17-jwt-auth/)
+---
 
-> [Angular 17 Logout when Token is expired](https://www.bezkoder.com/logout-when-token-expired-angular-17/)
+## AuthService — gestion complète des tokens
 
-> [Angular Refresh Token with Interceptor & JWT example](https://www.bezkoder.com/angular-17-refresh-token/)
+```typescript
+@Injectable({ providedIn: 'root' })
+export class AuthService {
+  private currentUserSubject = new BehaviorSubject<User | null>(null);
+  public currentUser$ = this.currentUserSubject.asObservable();
 
-## With Spring Boot back-end
+  constructor(private http: HttpClient, private router: Router) {
+    // Restaurer l'utilisateur depuis le token au démarrage
+    const token = this.getAccessToken();
+    if (token && !this.isTokenExpired(token)) {
+      this.currentUserSubject.next(this.decodeToken(token));
+    }
+  }
 
-> [Angular 17 + Spring Boot: JWT Authentication and Authorization example](https://www.bezkoder.com/angular-17-spring-boot-jwt-auth/)
+  login(credentials: LoginDto): Observable<AuthTokens> {
+    return this.http.post<AuthTokens>('/api/auth/login', credentials).pipe(
+      tap(tokens => this.handleTokens(tokens))
+    );
+  }
 
-## With Node.js Express back-end
+  refreshToken(): Observable<AuthTokens> {
+    const refreshToken = localStorage.getItem('refresh_token');
+    return this.http.post<AuthTokens>('/api/auth/refresh', { refreshToken }).pipe(
+      tap(tokens => this.handleTokens(tokens))
+    );
+  }
 
-> [Angular 17 + Node.js Express: JWT Authentication and Authorization example](https://www.bezkoder.com/node-js-angular-17-jwt-auth/)
+  logout(): void {
+    localStorage.removeItem('access_token');
+    localStorage.removeItem('refresh_token');
+    this.currentUserSubject.next(null);
+    this.router.navigate(['/auth/login']);
+  }
 
-Run `ng serve --port 8081` for a dev server. Navigate to `http://localhost:8081/`.
+  getUserRoles(): string[] {
+    const token = this.getAccessToken();
+    if (!token) return [];
+    const decoded = this.decodeToken(token);
+    return decoded?.roles ?? [];
+  }
 
-## More practice
-> [Angular 17 CRUD example with Rest API](https://www.bezkoder.com/angular-17-crud-example/)
+  getAccessToken(): string | null {
+    return localStorage.getItem('access_token');
+  }
 
-> [Angular 17 Pagination example](https://www.bezkoder.com/angular-17-pagination-ngx/)
+  isTokenExpired(token: string): boolean {
+    const decoded = this.decodeToken(token);
+    if (!decoded?.exp) return true;
+    return Date.now() >= decoded.exp * 1000;
+  }
 
-> [Angular 17 File upload example with Progress bar](https://www.bezkoder.com/angular-17-file-upload/)
+  private handleTokens(tokens: AuthTokens): void {
+    localStorage.setItem('access_token',  tokens.accessToken);
+    localStorage.setItem('refresh_token', tokens.refreshToken);
+    this.currentUserSubject.next(this.decodeToken(tokens.accessToken));
+  }
 
-> [Angular 17 Form Validation example](https://www.bezkoder.com/angular-17-form-validation/)
+  private decodeToken(token: string): any {
+    try {
+      return JSON.parse(atob(token.split('.')[1]));
+    } catch {
+      return null;
+    }
+  }
+}
+```
 
-Fullstack with Node:
-> [Angular 17 + Node Express + MySQL example](https://www.bezkoder.com/angular-17-node-js-express-mysql/)
+---
 
-> [Angular 17 + Node Express + PostgreSQL example](https://www.bezkoder.com/angular-17-node-js-express-postgresql/)
+## Directive *hasRole — contrôle par template
 
-> [Angular 17 + Node Express + MongoDB example](https://www.bezkoder.com/angular-17-node-js-express-mongodb/)
+```typescript
+// shared/directives/has-role.directive.ts
+@Directive({ selector: '[hasRole]' })
+export class HasRoleDirective implements OnInit {
+  @Input('hasRole') requiredRole!: string | string[];
 
-> [Angular 17 + Node Express: File upload example](https://www.bezkoder.com/angular-17-node-express-file-upload/)
+  constructor(
+    private viewContainer: ViewContainerRef,
+    private templateRef: TemplateRef<any>,
+    private authService: AuthService
+  ) {}
 
-Fullstack with Spring Boot:
-> [Angular 17 + Spring Boot example](https://www.bezkoder.com/spring-boot-angular-17-crud/)
+  ngOnInit(): void {
+    const userRoles = this.authService.getUserRoles();
+    const required = Array.isArray(this.requiredRole)
+      ? this.requiredRole
+      : [this.requiredRole];
 
-> [Angular 17 + Spring Boot + MySQL example](https://www.bezkoder.com/spring-boot-angular-17-mysql/)
+    if (required.some(r => userRoles.includes(r))) {
+      this.viewContainer.createEmbeddedView(this.templateRef);
+    } else {
+      this.viewContainer.clear();
+    }
+  }
+}
 
-> [Angular 17 + Spring Boot + PostgreSQL example](https://www.bezkoder.com/spring-boot-angular-17-postgresql/)
+// Usage dans le template :
+// <button *hasRole="'ADMIN'">Supprimer</button>
+// <div *hasRole="['ADMIN', 'MANAGER']">Section réservée</div>
+```
 
-> [Angular 17 + Spring Boot + MongoDB example](https://www.bezkoder.com/spring-boot-angular-17-mongodb/)
+---
 
-> [Angular 17 + Spring Boot: File upload example](https://www.bezkoder.com/angular-17-spring-boot-file-upload/)
+## Tests unitaires Jasmine — AuthService
 
-Fullstack with Django:
-> [Angular + Django example](https://www.bezkoder.com/django-angular-13-crud-rest-framework/)
+```typescript
+describe('AuthService', () => {
+  let service: AuthService;
+  let httpMock: HttpTestingController;
+  let routerSpy: jasmine.SpyObj<Router>;
 
-> [Angular + Django + MySQL](https://www.bezkoder.com/django-angular-mysql/)
+  beforeEach(() => {
+    routerSpy = jasmine.createSpyObj('Router', ['navigate']);
 
-> [Angular + Django + PostgreSQL](https://www.bezkoder.com/django-angular-postgresql/)
+    TestBed.configureTestingModule({
+      imports: [HttpClientTestingModule],
+      providers: [
+        AuthService,
+        { provide: Router, useValue: routerSpy }
+      ]
+    });
 
-> [Angular + Django + MongoDB](https://www.bezkoder.com/django-angular-mongodb/)
+    service = TestBed.inject(AuthService);
+    httpMock = TestBed.inject(HttpTestingController);
+    localStorage.clear();
+  });
 
-Serverless with Firebase:
-> [Angular 17 Firebase CRUD with Realtime DataBase](https://www.bezkoder.com/angular-17-firebase-crud/)
+  afterEach(() => {
+    httpMock.verify();
+    localStorage.clear();
+  });
 
-> [Angular 17 Firestore CRUD example](https://www.bezkoder.com/angular-17-firestore-crud/)
+  it('should store tokens after login', () => {
+    const mockTokens = {
+      accessToken:  'eyJ.mock.access',
+      refreshToken: 'eyJ.mock.refresh'
+    };
 
-> [Angular 17 Firebase Storage: File Upload/Display/Delete example](https://www.bezkoder.com/angular-17-firebase-storage/)
+    service.login({ username: 'admin', password: 'secret' }).subscribe();
 
-Integration (run back-end & front-end on same server/port)
-> [How to integrate Angular with Node Restful Services](https://www.bezkoder.com/integrate-angular-12-node-js/)
+    const req = httpMock.expectOne('/api/auth/login');
+    req.flush(mockTokens);
 
-> [How to Integrate Angular with Spring Boot Rest API](https://www.bezkoder.com/integrate-angular-12-spring-boot/)
+    expect(localStorage.getItem('access_token')).toBe(mockTokens.accessToken);
+    expect(localStorage.getItem('refresh_token')).toBe(mockTokens.refreshToken);
+  });
+
+  it('should clear tokens and redirect on logout', () => {
+    localStorage.setItem('access_token',  'some.token');
+    localStorage.setItem('refresh_token', 'some.refresh');
+
+    service.logout();
+
+    expect(localStorage.getItem('access_token')).toBeNull();
+    expect(routerSpy.navigate).toHaveBeenCalledWith(['/auth/login']);
+  });
+
+  it('should return user roles from decoded token', () => {
+    // Token avec payload { roles: ['ADMIN', 'USER'] }
+    const payload = btoa(JSON.stringify({ roles: ['ADMIN', 'USER'], exp: 9999999999 }));
+    localStorage.setItem('access_token', `eyJ.${payload}.sig`);
+
+    const roles = service.getUserRoles();
+
+    expect(roles).toContain('ADMIN');
+    expect(roles).toContain('USER');
+  });
+});
+```
+
+---
+
+## Ce que j'ai appris
+
+Le test le plus important ici n'est pas le login — c'est le comportement
+sous charge simultanée : que se passe-t-il si 3 requêtes reçoivent un 401
+au même moment ? Sans protection, on déclenche 3 refresh, le 2ème invalide
+le token du 1er, et l'utilisateur se retrouve déconnecté sans raison.
+
+Le `BehaviorSubject` dans l'interceptor + le flag `isRefreshing` est la
+solution classique. Mais la valider en test nécessite de simuler des appels
+concurrents avec `forkJoin` — c'est ce type de test qui révèle les vraies
+fragilités d'une implémentation.
+
+---
+
+*Projet réalisé dans le cadre de ma formation ingénieur — ENSET Mohammedia*
+*Par **Abderrahmane Elouafi** · [LinkedIn](https://www.linkedin.com/in/abderrahmane-elouafi-43226736b/) · [Portfolio](https://my-first-porfolio-six.vercel.app/)*
